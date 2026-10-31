@@ -11,7 +11,7 @@ import {
   getTransferFeeConfig,
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
-import { minProtocolFee, splitGross } from "./constants";
+import { FEE_BPS, minProtocolFee, splitGross } from "./constants";
 import { be32, ciphertextHash, hexBytes, packProof, pubkeyField } from "./encoding";
 import type { LacunaKeys } from "./keys";
 import { decryptNote, encryptNote, type NoteBody } from "./note";
@@ -88,6 +88,7 @@ type DecodedNote = {
   treeNumber: number;
   index: number;
   commitment: bigint;
+  net: bigint;
   ciphertext: string;
 };
 
@@ -95,9 +96,10 @@ function decodeNote(data: Buffer): DecodedNote {
   const treeNumber = Number(data.readBigUInt64LE(8));
   const index = Number(data.readBigUInt64LE(16));
   const commitment = BigInt("0x" + data.subarray(24, 56).toString("hex"));
-  const len = data.readUInt16LE(56);
-  const ciphertext = "0x" + data.subarray(58, 58 + len).toString("hex");
-  return { treeNumber, index, commitment, ciphertext };
+  const net = data.readBigUInt64LE(56) + (data.readBigUInt64LE(64) << 64n);
+  const len = data.readUInt16LE(72);
+  const ciphertext = "0x" + data.subarray(74, 74 + len).toString("hex");
+  return { treeNumber, index, commitment, net, ciphertext };
 }
 
 function isInsertRace(error: unknown): boolean {
@@ -165,36 +167,64 @@ export async function loadTree(program: AnyProgram): Promise<NoteForest> {
   return forest;
 }
 
+async function recoverNoteValue(
+  keys: LacunaKeys,
+  entry: DecodedNote,
+  decrypted: NoteBody,
+  feeBps: bigint[],
+): Promise<bigint | null> {
+  const eventCommitment = entry.commitment;
+  const candidates = new Set<bigint>([decrypted.value, 1n]);
+  if (entry.net > 0n) candidates.add(entry.net);
+  for (const bps of feeBps) {
+    candidates.add(splitGross(decrypted.value, bps).net);
+    if (entry.net > 0n) candidates.add(splitGross(entry.net, bps).net);
+  }
+  for (const value of candidates) {
+    if ((await commitmentOf(value, keys.npk, decrypted.blinding, decrypted.token)) === eventCommitment) {
+      return value;
+    }
+  }
+  return null;
+}
+
 export async function scan(program: AnyProgram, keys: LacunaKeys): Promise<ScannedNote[]> {
   const notes = await fetchNotes(program);
-  const found: ScannedNote[] = [];
+  let feeBps = [FEE_BPS];
+  try {
+    const config = await program.account.config.fetch(configPda()[0]);
+    feeBps = [BigInt(config.shieldFeeBps), BigInt(config.unshieldFeeBps), BigInt(config.swapFeeBps), FEE_BPS];
+  } catch {
+    /* keep default */
+  }
+  const recovered: { entry: DecodedNote; body: NoteBody; commitment: bigint; nullPda: PublicKey }[] = [];
   for (const entry of notes) {
     const ciphertext = entry.ciphertext;
     if (ciphertext === "0x") continue;
     const decrypted = decryptNote(ciphertext, keys.viewingPrivate);
     if (!decrypted) continue;
-    const eventCommitment = entry.commitment;
-    let value = decrypted.value;
-    if ((await commitmentOf(value, keys.npk, decrypted.blinding, decrypted.token)) !== eventCommitment) {
-      const net = splitGross(value).net;
-      const nftTry = await commitmentOf(1n, keys.npk, decrypted.blinding, decrypted.token);
-      const netTry = await commitmentOf(net, keys.npk, decrypted.blinding, decrypted.token);
-      if (nftTry === eventCommitment) value = 1n;
-      else if (netTry === eventCommitment) value = net;
-      else continue;
-    }
+    const value = await recoverNoteValue(keys, entry, decrypted, feeBps);
+    if (value === null) continue;
     const body = { ...decrypted, value };
     const commitment = await commitmentOf(body.value, keys.npk, body.blinding, body.token);
     const nullifier = await nullifierOf(keys.spendingKey, commitment);
-    const [nullPda] = nullifierPda(toBe32(nullifier));
-    const spentInfo = await program.provider.connection.getAccountInfo(nullPda);
-    found.push({
-      ...body,
-      treeNumber: entry.treeNumber,
-      index: entry.index,
-      commitment,
-      spent: spentInfo !== null,
-    });
+    recovered.push({ entry, body, commitment, nullPda: nullifierPda(toBe32(nullifier))[0] });
+  }
+  const found: ScannedNote[] = [];
+  const connection = program.provider.connection;
+  for (let offset = 0; offset < recovered.length; offset += 100) {
+    const batch = recovered.slice(offset, offset + 100);
+    const infos = await connection.getMultipleAccountsInfo(batch.map((item) => item.nullPda));
+    for (let i = 0; i < batch.length; i++) {
+      const item = batch[i];
+      found.push({
+        ...item.body,
+        treeNumber: item.entry.treeNumber,
+        index: item.entry.index,
+        commitment: item.commitment,
+        spent: infos[i] !== null,
+      });
+    }
   }
   return found.sort((a, b) => a.treeNumber - b.treeNumber || a.index - b.index);
 }

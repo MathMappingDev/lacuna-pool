@@ -63,12 +63,19 @@ export function ciphertextHash(first: string, second: string): bigint {
   return bytesField(buf);
 }
 
+export function cipherHash(hex: string): Buffer {
+  const data = hex === "0x" || hex === "" ? Buffer.alloc(0) : hexBytes(hex);
+  return Buffer.from(keccak256(data).slice(2), "hex");
+}
+
 export function swapCommitment(input: {
   hop: PublicKey;
   mintOut: PublicKey;
   minOut: bigint;
   outOwnerHash: bigint;
   refundOwnerHash: bigint;
+  outCipherHash: Uint8Array;
+  refundCipherHash: Uint8Array;
 }): bigint {
   return bytesField(
     Buffer.concat([
@@ -77,6 +84,8 @@ export function swapCommitment(input: {
       u64(input.minOut),
       be32(input.outOwnerHash),
       be32(input.refundOwnerHash),
+      Buffer.from(input.outCipherHash),
+      Buffer.from(input.refundCipherHash),
     ]),
   );
 }

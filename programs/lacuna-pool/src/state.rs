@@ -19,10 +19,11 @@ pub struct Config {
     pub paused_swaps: bool,
     pub exit_pause_until: i64,
     pub last_exit_pause: i64,
+    pub refund_delay_slots: u64,
 }
 
 impl Config {
-    pub const SIZE: usize = 8 + 32 + 32 + 32 + 32 + 2 + 2 + 2 + 8 + 1 + 1 + 1 + 1 + 1 + 8 + 8;
+    pub const SIZE: usize = 8 + 32 + 32 + 32 + 32 + 2 + 2 + 2 + 8 + 1 + 1 + 1 + 1 + 1 + 8 + 8 + 8;
 }
 
 #[account]
@@ -57,12 +58,14 @@ pub struct NoteRecord {
     pub tree_number: u64,
     pub leaf_index: u64,
     pub commitment: [u8; 32],
+    /// Public net for shield and swap notes. Zero for private-send outputs.
+    pub net: u128,
     pub ciphertext_len: u16,
     pub ciphertext: [u8; MAX_CIPHERTEXT],
 }
 
 impl NoteRecord {
-    pub const SIZE: usize = 8 + 8 + 8 + 32 + 2 + MAX_CIPHERTEXT;
+    pub const SIZE: usize = 8 + 8 + 8 + 32 + 16 + 2 + MAX_CIPHERTEXT;
 }
 
 #[account]
@@ -113,10 +116,28 @@ pub struct SwapEscrow {
     pub nullifier0: [u8; 32],
     pub preparer: Pubkey,
     pub prepared_slot: u64,
+    pub out_cipher_hash: [u8; 32],
+    pub refund_cipher_hash: [u8; 32],
 }
 
 impl SwapEscrow {
-    pub const SIZE: usize = 8 + 1 + 32 + 32 + 32 + 8 + 8 + 32 + 32 + 32 + 32 + 32 + 32 + 8;
+    pub const SIZE: usize = 8
+        + 1
+        + 32
+        + 32
+        + 32
+        + 8
+        + 8
+        + 32
+        + 32
+        + 32
+        + 32
+        + 32
+        + 32
+        + 32
+        + 8
+        + 32
+        + 32;
 }
 
 /// Native SOL sentinel. Matches Ethereum token id 0.

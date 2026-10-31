@@ -16,9 +16,11 @@ Devnet program ids (after you fund the deployer and run `npm run deploy:devnet`)
 ## How a private swap works
 
 1. Your proof unshields the input into a PDA escrow derived from the spent nullifier. Only that swap can sign it.
-2. `swap_execute` runs an **allowlisted** hop against that escrow. The vault must receive at least `min_out`. The input ATA must end empty.
+2. `swap_execute` runs an **allowlisted** hop against that escrow. The vault must receive at least `min_out`. The output note is always `min_out` minus the swap fee; any extra hop surplus is protocol fee. The input ATA must end empty. Native SOL and transfer-fee mints cannot be swap legs.
 3. Output is shielded to the `owner_hash` bound in the proof. The hop cannot touch the rest of the pool.
-4. If the hop never runs, `swap_refund` returns the escrow to a note for that same `owner_hash`, minus the swap fee. The preparing payer can refund immediately; after 32 slots anyone may, and they cannot choose the recipient.
+4. If the hop never runs, `swap_refund` returns the escrow to a note for that same `owner_hash`, minus the swap fee. Refund stays available when swaps are paused. The preparing payer can refund immediately; after `refund_delay_slots` (default 200, owner-set 150–300) anyone may, and they cannot choose the recipient. Escrow and ATA rent return to the preparer.
+
+The proof binds `keccak` of the execute ciphertext and the refund ciphertext. A relayer must submit those exact buffers; garbage encryption is rejected. The execute ciphertext carries `(blinding, token)` with value omitted (scan reads the public net on the note). The refund ciphertext carries the full net known at prepare. `reject_extra_escrow_token_accounts` only sees hop accounts present at the start of the CPI — keep `min_out` tight so an allowlisted hop cannot siphon through an ATA it creates mid-call.
 
 There is no shared leftover pile and no permissionless `reshield`.
 
@@ -64,6 +66,6 @@ Do not rebuild `circuits/transact.circom` unless you also replace the verifying 
 npm run deploy:devnet
 ```
 
-The first run prints a deployer address. Send it about 2 SOL on Devnet and run the command again. The deployer is the treasury. After init, set the swap hop (`set_swap_program`) to the Jupiter program you want to allow, then freeze upgrade authority.
+The first run prints a deployer address. Send it about 2 SOL on Devnet and run the command again. The deployer is the treasury. After init, set the swap hop (`set_swap_program`) to the Jupiter program you want to allow. Devnet keeps the deployer as upgrade authority. For a final freeze, run `LACUNA_FREEZE_UPGRADE=1 npm run deploy:devnet` (or `solana program set-upgrade-authority <program> --final`). Do that only when you are done upgrading.
 
 This is not audited. The proving key is still a single-machine setup. Do not put real funds in until a public ceremony, a frozen upgrade authority, and an external audit.

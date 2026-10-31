@@ -6,7 +6,7 @@ import {
   getOrCreateAssociatedTokenAccount,
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
-import { be32, pubkeyField, swapCommitment } from "./encoding";
+import { be32, cipherHash, mintField, pubkeyField, swapCommitment } from "./encoding";
 import { commitmentOf, hash2, nullifierOf } from "./poseidon";
 import { encryptNote } from "./note";
 import { splitGross } from "./constants";
@@ -62,14 +62,40 @@ export async function swapPrepare(input: {
   outBlinding: bigint;
   refundNpk: bigint;
   refundBlinding: bigint;
+  viewingPublic: Uint8Array;
   tokenProgram?: PublicKey;
   accounts?: TransactOpts;
-}): Promise<{ signature: string; nullifier0: bigint; escrow: PublicKey }> {
+}): Promise<{
+  signature: string;
+  nullifier0: bigint;
+  escrow: PublicKey;
+  outCiphertext: string;
+  refundCiphertext: string;
+}> {
+  if (input.token === 0n) {
+    throw new Error("Native SOL cannot enter a swap escrow");
+  }
   const tokenProgram = input.tokenProgram ?? TOKEN_PROGRAM_ID;
   const nullifier0 = await nullifier0Of(input.inputs);
   const [escrow] = escrowPda(toBe32(nullifier0));
   const outOwnerHash = await hash2(input.outNpk, input.outBlinding);
   const refundOwnerHash = await hash2(input.refundNpk, input.refundBlinding);
+  const config = await input.pool.account.config.fetch(configPda()[0]);
+  const tokenOut = mintField(input.mintOut);
+  const outCiphertext = encryptNote(
+    { value: 0n, blinding: input.outBlinding, token: tokenOut },
+    input.viewingPublic,
+  );
+  const refundCiphertext = encryptNote(
+    {
+      value: splitGross(input.amountIn, BigInt(config.swapFeeBps)).net,
+      blinding: input.refundBlinding,
+      token: input.token,
+    },
+    input.viewingPublic,
+  );
+  const outCipher = cipherHash(outCiphertext);
+  const refundCipher = cipherHash(refundCiphertext);
   const vault = vaultPda()[0];
   await getOrCreateAssociatedTokenAccount(
     input.pool.provider.connection,
@@ -112,6 +138,8 @@ export async function swapPrepare(input: {
       minOut: input.minOut,
       outOwnerHash,
       refundOwnerHash,
+      outCipherHash: outCipher,
+      refundCipherHash: refundCipher,
     }),
     accounts: {
       ...input.accounts,
@@ -132,6 +160,8 @@ export async function swapPrepare(input: {
       [...toBe32(outOwnerHash)],
       [...toBe32(refundOwnerHash)],
       [...toBe32(nullifier0)],
+      [...outCipher],
+      [...refundCipher],
     )
     .accounts({
       payer: input.payer,
@@ -147,7 +177,7 @@ export async function swapPrepare(input: {
     })
     .preInstructions([ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 })])
     .rpc();
-  return { signature, nullifier0, escrow };
+  return { signature, nullifier0, escrow, outCiphertext, refundCiphertext };
 }
 
 export async function swapExecute(input: {
@@ -160,21 +190,19 @@ export async function swapExecute(input: {
   amountOut: bigint;
   outNpk: bigint;
   outBlinding: bigint;
-  viewingPublic: Uint8Array;
+  outCiphertext: string;
   tokenIdOut: bigint;
   tokenProgram?: PublicKey;
 }): Promise<string> {
   const tokenProgram = input.tokenProgram ?? TOKEN_PROGRAM_ID;
   const [escrow] = escrowPda(toBe32(input.nullifier0));
+  const escrowAccount = await input.pool.account.swapEscrow.fetch(escrow);
   const config = await input.pool.account.config.fetch(configPda()[0]);
-  const net = splitGross(input.amountOut, BigInt(config.swapFeeBps)).net;
-  const ciphertext = encryptNote(
-    { value: net, blinding: input.outBlinding, token: input.tokenIdOut },
-    input.viewingPublic,
-  );
+  const credited = BigInt(escrowAccount.minOut.toString());
+  const net = splitGross(credited, BigInt(config.swapFeeBps)).net;
   const ownerHash = await hash2(input.outNpk, input.outBlinding);
   const commitment = await commitmentOf(net, input.outNpk, input.outBlinding, input.tokenIdOut);
-  const cipher = await ensureCipher(input.pool, input.payer, 2, ciphertext);
+  const cipher = await ensureCipher(input.pool, input.payer, 2, input.outCiphertext);
   const insert = await insertAccounts(input.pool, commitment);
   if (ownerHash === 0n) throw new Error("Bad output owner hash");
   const vault = vaultPda()[0];
@@ -199,14 +227,17 @@ export async function swapExecute(input: {
       mintIn: input.mintIn,
       mintOut: input.mintOut,
       escrowAta: getAssociatedTokenAddressSync(input.mintIn, escrow, true, tokenProgram),
+      vaultAtaIn: getAssociatedTokenAddressSync(input.mintIn, vault, true, tokenProgram),
       vaultAtaOut: getAssociatedTokenAddressSync(input.mintOut, vault, true, tokenProgram),
       hopProgram: input.hop.programId,
+      preparer: escrowAccount.preparer,
       ciphertext: cipher,
       commitment: insert.commitment,
       root: insert.root,
       note: insert.note,
       tokenStateOut: tokenPda(toBe32(input.tokenIdOut))[0],
       tokenProgram,
+      associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
       systemProgram: SystemProgram.programId,
     })
     .remainingAccounts(
@@ -228,25 +259,25 @@ export async function swapRefund(input: {
   amountIn: bigint;
   refundNpk: bigint;
   refundBlinding: bigint;
-  viewingPublic: Uint8Array;
+  refundCiphertext: string;
   tokenIdIn: bigint;
   tokenProgram?: PublicKey;
 }): Promise<string> {
   const tokenProgram = input.tokenProgram ?? TOKEN_PROGRAM_ID;
   const [escrow] = escrowPda(toBe32(input.nullifier0));
+  const escrowAccount = await input.pool.account.swapEscrow.fetch(escrow);
   const config = await input.pool.account.config.fetch(configPda()[0]);
-  const net = splitGross(input.amountIn, BigInt(config.swapFeeBps)).net;
-  const ciphertext = encryptNote(
-    { value: net, blinding: input.refundBlinding, token: input.tokenIdIn },
-    input.viewingPublic,
-  );
+  const escrowAta = getAssociatedTokenAddressSync(input.mintIn, escrow, true, tokenProgram);
+  const parkedInfo = await input.pool.provider.connection.getTokenAccountBalance(escrowAta);
+  const parked = BigInt(parkedInfo.value.amount);
+  const net = splitGross(parked, BigInt(config.swapFeeBps)).net;
   const commitment = await commitmentOf(
     net,
     input.refundNpk,
     input.refundBlinding,
     input.tokenIdIn,
   );
-  const cipher = await ensureCipher(input.pool, input.payer, 2, ciphertext);
+  const cipher = await ensureCipher(input.pool, input.payer, 2, input.refundCiphertext);
   const insert = await insertAccounts(input.pool, commitment);
   const vault = vaultPda()[0];
   return input.pool.methods
@@ -258,6 +289,7 @@ export async function swapRefund(input: {
       tree: treePda()[0],
       escrow,
       mintIn: input.mintIn,
+      preparer: escrowAccount.preparer,
       escrowAta: getAssociatedTokenAddressSync(input.mintIn, escrow, true, tokenProgram),
       vaultAta: getAssociatedTokenAddressSync(input.mintIn, vault, true, tokenProgram),
       ciphertext: cipher,
@@ -266,6 +298,7 @@ export async function swapRefund(input: {
       note: insert.note,
       tokenState: tokenPda(toBe32(input.tokenIdIn))[0],
       tokenProgram,
+      associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
       systemProgram: SystemProgram.programId,
     })
     .preInstructions([ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 })])

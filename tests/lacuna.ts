@@ -103,6 +103,16 @@ describe("Lacuna Solana pool", function () {
     expect(config.shieldFeeBps).to.equal(20);
     expect(config.unshieldFeeBps).to.equal(20);
     expect(config.swapFeeBps).to.equal(20);
+    expect(Number(config.refundDelaySlots)).to.equal(200);
+    await program.methods.setRefundDelaySlots(new anchor.BN(150)).accounts({ payer }).rpc();
+    await program.methods.setRefundDelaySlots(new anchor.BN(300)).accounts({ payer }).rpc();
+    try {
+      await program.methods.setRefundDelaySlots(new anchor.BN(32)).accounts({ payer }).rpc();
+      expect.fail("expected BadValue");
+    } catch (error: unknown) {
+      expect(String(error)).to.match(/BadValue|custom program error/i);
+    }
+    await program.methods.setRefundDelaySlots(new anchor.BN(200)).accounts({ payer }).rpc();
     await program.methods.setShieldFeeBps(0).accounts({ payer }).rpc();
     await program.methods.setShieldFeeBps(100).accounts({ payer }).rpc();
     await program.methods.setUnshieldFeeBps(0).accounts({ payer }).rpc();
@@ -554,6 +564,7 @@ describe("Lacuna Solana pool", function () {
       outBlinding,
       refundNpk: alice.npk,
       refundBlinding,
+      viewingPublic: alice.viewingPublic,
       accounts: {
         tokenMint0: sell,
         vaultAta0: getAssociatedTokenAddressSync(sell, vault, true),
@@ -574,6 +585,32 @@ describe("Lacuna Solana pool", function () {
         tokenProgram: TOKEN_PROGRAM_ID,
       })
       .instruction();
+    try {
+      await swapExecute({
+        pool: program,
+        payer,
+        nullifier0: prepared.nullifier0,
+        mintIn: sell,
+        mintOut: buy,
+        hop: {
+          programId: ammProgram.programId,
+          data: Buffer.from(swapIx.data),
+          accounts: swapIx.keys.map((key) => ({
+            pubkey: key.pubkey,
+            isWritable: key.isWritable,
+            isSigner: key.pubkey.equals(prepared.escrow) ? false : key.isSigner,
+          })),
+        },
+        amountOut: swapAmount,
+        outNpk: alice.npk,
+        outBlinding,
+        outCiphertext: encryptNote({ value: 0n, blinding: outBlinding, token: buyId }, alice.viewingPublic),
+        tokenIdOut: buyId,
+      });
+      expect.fail("expected BadProof");
+    } catch (error: unknown) {
+      expect(String(error)).to.match(/BadProof|custom program error|Simulation failed/i);
+    }
     await swapExecute({
       pool: program,
       payer,
@@ -592,7 +629,7 @@ describe("Lacuna Solana pool", function () {
       amountOut: swapAmount,
       outNpk: alice.npk,
       outBlinding,
-      viewingPublic: alice.viewingPublic,
+      outCiphertext: prepared.outCiphertext,
       tokenIdOut: buyId,
     });
     const buyNotes = (await scan(program, alice)).filter((item) => item.token === buyId);
@@ -638,6 +675,7 @@ describe("Lacuna Solana pool", function () {
       outBlinding: randomBlinding(),
       refundNpk: bob.npk,
       refundBlinding: refundBlinding2,
+      viewingPublic: bob.viewingPublic,
       accounts: {
         tokenMint0: sell,
         vaultAta0: getAssociatedTokenAddressSync(sell, vault, true),
@@ -652,11 +690,38 @@ describe("Lacuna Solana pool", function () {
       amountIn: refundAmount,
       refundNpk: bob.npk,
       refundBlinding: refundBlinding2,
-      viewingPublic: bob.viewingPublic,
+      refundCiphertext: refunded.refundCiphertext,
       tokenIdIn: sellId,
     });
     const bobAfter = (await scan(program, bob)).filter((item) => item.token === sellId);
     expect(bobAfter.some((item) => item.value === splitGross(refundAmount).net && !item.spent)).to.equal(true);
+  });
+
+  it("rejects native SOL as a swap input", async function () {
+    try {
+      await swapPrepare({
+        pool: program,
+        payer,
+        root: 1n,
+        token: 0n,
+        mintIn: payer,
+        mintOut: payer,
+        hop: payer,
+        minOut: 1n,
+        amountIn: 1n,
+        inputs: [emptySpend(), emptySpend()],
+        outputs: [outputOf(0n, 0n, 0n), outputOf(0n, 0n, 0n)],
+        ciphertexts: ["0x", "0x"],
+        outNpk: 1n,
+        outBlinding: 1n,
+        refundNpk: 1n,
+        refundBlinding: 1n,
+        viewingPublic: new Uint8Array(32),
+      });
+      expect.fail("expected native SOL reject");
+    } catch (error: unknown) {
+      expect(String(error)).to.match(/Native SOL/i);
+    }
   });
 
   it("rejects owner_hash 0", async function () {

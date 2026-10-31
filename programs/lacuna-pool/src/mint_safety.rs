@@ -13,6 +13,7 @@ const BLOCKED_EXTENSIONS: &[u16] = &[
     ExtensionType::NonTransferable as u16,
     ExtensionType::PermanentDelegate as u16,
     ExtensionType::TransferHook as u16,
+    ExtensionType::InterestBearingConfig as u16,
     26,
 ];
 
@@ -37,6 +38,30 @@ pub fn assert_mint_safe(mint: &InterfaceAccount<Mint>) -> Result<()> {
         );
     }
     reject_unknown_blocked(&data)
+}
+
+/// Swap hop and refund cannot price a withheld transfer fee. Refuse those mints for swaps only.
+pub fn assert_mint_no_transfer_fee(mint: &InterfaceAccount<Mint>) -> Result<()> {
+    let info = mint.to_account_info();
+    if info.owner == &anchor_spl::token::ID {
+        return Ok(());
+    }
+    require!(
+        info.owner == &anchor_spl::token_2022::ID,
+        LacunaError::BadMint
+    );
+    let data = info.try_borrow_data()?;
+    let parsed = StateWithExtensions::<SplMint>::unpack(&data).map_err(|_| error!(LacunaError::BadMint))?;
+    let types = parsed
+        .get_extension_types()
+        .map_err(|_| error!(LacunaError::BadMint))?;
+    for ext in types {
+        require!(
+            ext != ExtensionType::TransferFeeConfig,
+            LacunaError::FeeOnTransfer
+        );
+    }
+    Ok(())
 }
 
 /// Newer Token-2022 builds can add Pausable (26) after this crate's enum.

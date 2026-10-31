@@ -5,8 +5,10 @@ pub const BPS_DENOMINATOR: u128 = 10_000;
 pub const DEFAULT_FEE_BPS: u16 = 20;
 pub const MAX_CIPHERTEXT: usize = 1024;
 pub const MAX_EXIT_PAUSE_SECS: i64 = 3 * 24 * 60 * 60;
-/// Slots the preparing payer has exclusive refund rights. After this, anyone may refund.
-pub const REFUND_DELAY_SLOTS: u64 = 32;
+/// Default exclusive-refund window (~80s). Owner may set 150–300 slots.
+pub const DEFAULT_REFUND_DELAY_SLOTS: u64 = 200;
+pub const MIN_REFUND_DELAY_SLOTS: u64 = 150;
+pub const MAX_REFUND_DELAY_SLOTS: u64 = 300;
 pub const EXIT_PAUSE_COOLDOWN_SECS: i64 = 7 * 24 * 60 * 60;
 pub const PROOF_A_SIZE: usize = 64;
 pub const PROOF_B_SIZE: usize = 128;

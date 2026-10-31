@@ -132,6 +132,12 @@ async function main() {
     deployer,
   );
   await initialize(connection, deployer);
+  const freeze = process.env.LACUNA_FREEZE_UPGRADE === "1";
+  if (freeze) {
+    for (const name of ["lacuna_pool", "lacuna_relay", "dummy_amm"]) {
+      solana(`program set-upgrade-authority ${IDS[name as keyof typeof IDS]} --final`, deployer);
+    }
+  }
   const out = writeStatus({
     status: "deployed",
     deployer: deployer.publicKey.toBase58(),
@@ -140,6 +146,10 @@ async function main() {
     vault: vaultPda()[0].toBase58(),
     tree: treePda()[0].toBase58(),
     relayPda: relayPda()[0].toBase58(),
+    upgradeAuthority: freeze ? "frozen" : "deployer",
+    note: freeze
+      ? "Upgrade authority is frozen. Not audited. Not mainnet."
+      : "Upgrade authority is the deployer. Set LACUNA_FREEZE_UPGRADE=1 to call set-upgrade-authority --final. Not audited. Not mainnet.",
   });
   console.log(JSON.stringify(out, null, 2));
 }

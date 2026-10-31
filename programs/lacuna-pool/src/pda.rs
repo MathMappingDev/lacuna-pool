@@ -76,6 +76,7 @@ pub fn write_note<'info>(
     tree_number: u64,
     leaf_index: u64,
     commitment: [u8; 32],
+    recorded_net: u128,
     ciphertext: &[u8],
 ) -> Result<()> {
     require!(
@@ -90,6 +91,7 @@ pub fn write_note<'info>(
         tree_number,
         leaf_index,
         commitment,
+        net: recorded_net,
         ciphertext_len: ciphertext.len() as u16,
         ciphertext: [0u8; MAX_CIPHERTEXT],
     };

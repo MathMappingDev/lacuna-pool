@@ -91,18 +91,26 @@ pub fn ciphertext_commitment(first: &[u8], second: &[u8]) -> [u8; 32] {
     keccak_field(&buf)
 }
 
+pub fn cipher_hash(data: &[u8]) -> [u8; 32] {
+    keccak::hash(data).0
+}
+
 pub fn swap_commitment(
     hop: &Pubkey,
     mint_out: &Pubkey,
     min_out: u64,
     out_owner_hash: &[u8; 32],
     refund_owner_hash: &[u8; 32],
+    out_cipher_hash: &[u8; 32],
+    refund_cipher_hash: &[u8; 32],
 ) -> [u8; 32] {
-    let mut buf = Vec::with_capacity(32 + 32 + 8 + 32 + 32);
+    let mut buf = Vec::with_capacity(32 * 6 + 8);
     buf.extend_from_slice(hop.as_ref());
     buf.extend_from_slice(mint_out.as_ref());
     buf.extend_from_slice(&min_out.to_le_bytes());
     buf.extend_from_slice(out_owner_hash);
     buf.extend_from_slice(refund_owner_hash);
+    buf.extend_from_slice(out_cipher_hash);
+    buf.extend_from_slice(refund_cipher_hash);
     keccak_field(&buf)
 }

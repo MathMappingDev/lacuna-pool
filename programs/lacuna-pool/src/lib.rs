@@ -21,7 +21,7 @@ pub mod verifying_key;
 use constants::*;
 use error::LacunaError;
 use field::*;
-use mint_safety::assert_mint_safe;
+use mint_safety::{assert_mint_no_transfer_fee, assert_mint_safe};
 use state::*;
 use verify::{parse_proof, verify_proof};
 
@@ -55,6 +55,7 @@ pub mod lacuna_pool {
         config.paused_swaps = false;
         config.exit_pause_until = 0;
         config.last_exit_pause = 0;
+        config.refund_delay_slots = DEFAULT_REFUND_DELAY_SLOTS;
 
         let tree = &mut ctx.accounts.tree;
         tree.tree_number = 0;
@@ -149,6 +150,16 @@ pub mod lacuna_pool {
         require!(ctx.accounts.payer.key() == ctx.accounts.config.owner, LacunaError::NotOwner);
         require!(hop != Pubkey::default() && hop != crate::ID, LacunaError::BadSwapProgram);
         ctx.accounts.config.swap_program = hop;
+        Ok(())
+    }
+
+    pub fn set_refund_delay_slots(ctx: Context<Admin>, slots: u64) -> Result<()> {
+        require!(ctx.accounts.payer.key() == ctx.accounts.config.owner, LacunaError::NotOwner);
+        require!(
+            slots >= MIN_REFUND_DELAY_SLOTS && slots <= MAX_REFUND_DELAY_SLOTS,
+            LacunaError::BadValue
+        );
+        ctx.accounts.config.refund_delay_slots = slots;
         Ok(())
     }
 
@@ -408,6 +419,8 @@ pub mod lacuna_pool {
         out_owner_hash: [u8; 32],
         refund_owner_hash: [u8; 32],
         nullifier0: [u8; 32],
+        out_cipher_hash: [u8; 32],
+        refund_cipher_hash: [u8; 32],
     ) -> Result<()> {
         require!(
             ctx.accounts.payer.key() == ctx.accounts.transact.payer.key(),
@@ -417,6 +430,8 @@ pub mod lacuna_pool {
         require!(min_out > 0, LacunaError::BadValue);
         require!(!is_zero(&out_owner_hash) && lt_field(&out_owner_hash), LacunaError::BadValue);
         require!(!is_zero(&refund_owner_hash) && lt_field(&refund_owner_hash), LacunaError::BadValue);
+        require!(!is_zero(&out_cipher_hash), LacunaError::BadValue);
+        require!(!is_zero(&refund_cipher_hash), LacunaError::BadValue);
         require!(
             ctx.accounts.hop_program.key() == ctx.accounts.transact.config.swap_program
                 && ctx.accounts.transact.config.swap_program != Pubkey::default()
@@ -432,7 +447,11 @@ pub mod lacuna_pool {
                 == Some(ctx.accounts.escrow_ata.key()),
             LacunaError::BadSwap
         );
+        assert_mint_safe(&ctx.accounts.mint_in)?;
         assert_mint_safe(&ctx.accounts.mint_out)?;
+        assert_mint_no_transfer_fee(&ctx.accounts.mint_in)?;
+        assert_mint_no_transfer_fee(&ctx.accounts.mint_out)?;
+        require!(ctx.accounts.escrow_ata.amount == 0, LacunaError::BadSwap);
         let signals = run_transact(
             &mut ctx.accounts.transact,
             ctx.program_id,
@@ -450,6 +469,8 @@ pub mod lacuna_pool {
             min_out,
             &out_owner_hash,
             &refund_owner_hash,
+            &out_cipher_hash,
+            &refund_cipher_hash,
         );
         require!(signals.external == expected, LacunaError::BadProof);
         let amount_in: u64 = field_u128(&signals.amount0)?
@@ -458,29 +479,31 @@ pub mod lacuna_pool {
         require!(amount_in > 0 && is_zero(&signals.token1), LacunaError::BadSwap);
         let token_in = signals.token0;
         let token_out = mint_field(&ctx.accounts.mint_out.key())?;
-        let mint_in = ctx
+        let token_state_in = ctx
             .accounts
             .transact
             .token_state0
             .as_ref()
-            .ok_or(LacunaError::BadValue)?
-            .mint;
+            .ok_or(LacunaError::BadValue)?;
         require!(
-            !ctx.accounts
-                .transact
-                .token_state0
-                .as_ref()
-                .unwrap()
-                .is_nft,
+            !token_state_in.is_native && !token_state_in.is_nft,
             LacunaError::BadSwap
         );
+        require!(
+            token_state_in.mint == ctx.accounts.mint_in.key(),
+            LacunaError::BadSwap
+        );
+        let mint_in = token_state_in.mint;
         require!(mint_in != ctx.accounts.mint_out.key(), LacunaError::BadSwap);
+        ctx.accounts.escrow_ata.reload()?;
+        let received = ctx.accounts.escrow_ata.amount;
+        require!(received > 0, LacunaError::BadSwap);
         let escrow = &mut ctx.accounts.escrow;
         escrow.bump = ctx.bumps.escrow;
         escrow.mint_in = mint_in;
         escrow.mint_out = ctx.accounts.mint_out.key();
         escrow.hop = ctx.accounts.hop_program.key();
-        escrow.amount_in = amount_in;
+        escrow.amount_in = received;
         escrow.min_out = min_out;
         escrow.owner_hash = refund_owner_hash;
         escrow.out_owner_hash = out_owner_hash;
@@ -489,6 +512,8 @@ pub mod lacuna_pool {
         escrow.nullifier0 = nullifier0;
         escrow.preparer = ctx.accounts.payer.key();
         escrow.prepared_slot = Clock::get()?.slot;
+        escrow.out_cipher_hash = out_cipher_hash;
+        escrow.refund_cipher_hash = refund_cipher_hash;
         Ok(())
     }
 
@@ -521,6 +546,11 @@ pub mod lacuna_pool {
                 && ctx.accounts.vault_ata_out.mint == escrow.mint_out,
             LacunaError::BadSwap
         );
+        require!(
+            ctx.accounts.vault_ata_in.owner == ctx.accounts.config.vault
+                && ctx.accounts.vault_ata_in.mint == escrow.mint_in,
+            LacunaError::BadSwap
+        );
         require!(hop_data.len() >= 8, LacunaError::BadSwap);
         reject_extra_escrow_token_accounts(
             ctx.remaining_accounts,
@@ -550,11 +580,25 @@ pub mod lacuna_pool {
 
         ctx.accounts.escrow_ata.reload()?;
         ctx.accounts.vault_ata_out.reload()?;
+        let leftover = ctx.accounts.escrow_ata.amount;
+        if leftover > 0 {
+            token_interface::transfer_checked(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.to_account_info(),
+                    TransferChecked {
+                        from: ctx.accounts.escrow_ata.to_account_info(),
+                        mint: ctx.accounts.mint_in.to_account_info(),
+                        to: ctx.accounts.vault_ata_in.to_account_info(),
+                        authority: ctx.accounts.escrow.to_account_info(),
+                    },
+                    &[seeds],
+                ),
+                leftover,
+                ctx.accounts.mint_in.decimals,
+            )?;
+            ctx.accounts.escrow_ata.reload()?;
+        }
         require!(ctx.accounts.escrow_ata.amount == 0, LacunaError::BadSwap);
-        require!(
-            before_in.saturating_sub(ctx.accounts.escrow_ata.amount) == escrow.amount_in,
-            LacunaError::BadSwap
-        );
         let gained = ctx
             .accounts
             .vault_ata_out
@@ -562,9 +606,14 @@ pub mod lacuna_pool {
             .checked_sub(before_out)
             .ok_or(LacunaError::BadSwap)?;
         require!(gained >= escrow.min_out, LacunaError::Slippage);
-        let fee = fee_of(gained as u128, ctx.accounts.config.swap_fee_bps)?;
-        let net = gained as u128 - fee;
+        let credited = escrow.min_out as u128;
+        let fee = fee_of(credited, ctx.accounts.config.swap_fee_bps)?;
+        let net = credited - fee;
         require!(net > 0, LacunaError::BadValue);
+        let surplus = (gained as u128)
+            .checked_sub(net)
+            .ok_or(LacunaError::BadValue)?;
+        require_cipher_hash(&ctx.accounts.ciphertext, &escrow.out_cipher_hash)?;
         insert_shield(
             ctx.program_id,
             &ctx.accounts.payer.to_account_info(),
@@ -586,18 +635,19 @@ pub mod lacuna_pool {
             .accounts
             .token_state_out
             .fee_balance
-            .checked_add(fee)
+            .checked_add(surplus)
             .ok_or(LacunaError::BadValue)?;
         close_escrow_ata(
             &ctx.accounts.token_program,
             &ctx.accounts.escrow_ata,
-            &ctx.accounts.payer.to_account_info(),
+            &ctx.accounts.preparer.to_account_info(),
             &ctx.accounts.escrow.to_account_info(),
             seeds,
         )?;
         Ok(())
     }
 
+    /// Refund stays available while swaps are paused so a parked escrow can return to a note.
     pub fn swap_refund(ctx: Context<SwapRefund>, expected_index: u64) -> Result<()> {
         require!(
             ctx.accounts.tree.next_index == expected_index,
@@ -616,7 +666,7 @@ pub mod lacuna_pool {
             LacunaError::BadSwap
         );
         let slot = Clock::get()?.slot;
-        if slot <= escrow.prepared_slot.saturating_add(REFUND_DELAY_SLOTS) {
+        if slot <= escrow.prepared_slot.saturating_add(ctx.accounts.config.refund_delay_slots) {
             require!(
                 ctx.accounts.payer.key() == escrow.preparer,
                 LacunaError::BadSwap
@@ -626,6 +676,7 @@ pub mod lacuna_pool {
         require!(leftover > 0, LacunaError::BadValue);
         let bump = [escrow.bump];
         let seeds: &[&[u8]] = &[SEED_ESCROW, &escrow.nullifier0, &bump];
+        let before_vault = ctx.accounts.vault_ata.amount;
         token_interface::transfer_checked(
             CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
@@ -640,9 +691,18 @@ pub mod lacuna_pool {
             leftover,
             ctx.accounts.mint_in.decimals,
         )?;
-        let fee = fee_of(leftover as u128, ctx.accounts.config.swap_fee_bps)?;
-        let net = leftover as u128 - fee;
+        ctx.accounts.vault_ata.reload()?;
+        let received = ctx
+            .accounts
+            .vault_ata
+            .amount
+            .checked_sub(before_vault)
+            .ok_or(LacunaError::BadSwap)?;
+        require!(received > 0, LacunaError::FeeOnTransfer);
+        let fee = fee_of(received as u128, ctx.accounts.config.swap_fee_bps)?;
+        let net = received as u128 - fee;
         require!(net > 0, LacunaError::BadValue);
+        require_cipher_hash(&ctx.accounts.ciphertext, &escrow.refund_cipher_hash)?;
         insert_shield(
             ctx.program_id,
             &ctx.accounts.payer.to_account_info(),
@@ -669,7 +729,7 @@ pub mod lacuna_pool {
         close_escrow_ata(
             &ctx.accounts.token_program,
             &ctx.accounts.escrow_ata,
-            &ctx.accounts.payer.to_account_info(),
+            &ctx.accounts.preparer.to_account_info(),
             &ctx.accounts.escrow.to_account_info(),
             seeds,
         )?;
@@ -681,6 +741,16 @@ fn cipher<'a>(buffer: &'a Account<CipherBuffer>) -> &'a [u8] {
     &buffer.payload[..buffer.filled as usize]
 }
 
+fn require_cipher_hash(buffer: &Account<CipherBuffer>, expected: &[u8; 32]) -> Result<()> {
+    let data = cipher(buffer);
+    require!(!data.is_empty(), LacunaError::BadProof);
+    require!(cipher_hash(data) == *expected, LacunaError::BadProof);
+    Ok(())
+}
+
+/// Only inspects remaining accounts present at the start of the hop. An allowlisted
+/// hop that creates a new escrow-owned ATA mid-CPI is not visible here; keep `min_out`
+/// tight so that hop cannot siphon value.
 fn reject_extra_escrow_token_accounts(
     remaining: &[AccountInfo],
     escrow: &Pubkey,
@@ -801,6 +871,7 @@ fn run_transact(
         &accounts.root0.to_account_info(),
         &accounts.note0.to_account_info(),
         parsed.public_inputs[3],
+        0,
         c0,
     )?;
     insert_output(
@@ -812,6 +883,7 @@ fn run_transact(
         &accounts.root1.to_account_info(),
         &accounts.note1.to_account_info(),
         parsed.public_inputs[4],
+        0,
         c1,
     )?;
     exit_leg(accounts, &parsed.public_inputs, 0)?;
@@ -908,6 +980,7 @@ fn insert_shield<'info>(
         root_ai,
         note_ai,
         commitment,
+        net,
         ciphertext,
     )
 }
@@ -921,6 +994,7 @@ fn insert_output<'info>(
     root_ai: &AccountInfo<'info>,
     note_ai: &AccountInfo<'info>,
     commitment: [u8; 32],
+    recorded_net: u128,
     ciphertext: &[u8],
 ) -> Result<()> {
     if is_zero(&commitment) {
@@ -940,6 +1014,7 @@ fn insert_output<'info>(
         tree_number,
         index,
         commitment,
+        recorded_net,
         ciphertext,
     )?;
     emit!(NoteEvent {
@@ -1007,7 +1082,10 @@ fn check_public(
         );
     }
     if allow_swap {
-        require!(fee0 == 0 && fee1 == 0 && relay_fee == 0, LacunaError::BadFee);
+        require!(
+            two == 0 && amount1 == 0 && fee0 == 0 && fee1 == 0 && relay_fee == 0,
+            LacunaError::BadFee
+        );
     } else {
         check_unshield_fee(amount0, fee0, relay_fee, accounts.config.unshield_fee_bps)?;
         check_unshield_fee(amount1, fee1, 0, accounts.config.unshield_fee_bps)?;
@@ -1343,7 +1421,7 @@ pub struct Admin<'info> {
 pub struct ShieldSol<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
-    /// SOL source: the user wallet, or the relay PDA via CPI.
+    /// SOL source: the user wallet that pays the shield.
     #[account(mut)]
     pub source: Signer<'info>,
     #[account(mut, seeds = [SEED_CONFIG], bump = config.bump)]
@@ -1514,7 +1592,9 @@ pub struct Transact<'info> {
     min_out: u64,
     out_owner_hash: [u8; 32],
     refund_owner_hash: [u8; 32],
-    nullifier0: [u8; 32]
+    nullifier0: [u8; 32],
+    out_cipher_hash: [u8; 32],
+    refund_cipher_hash: [u8; 32]
 )]
 pub struct SwapPrepare<'info> {
     #[account(mut)]
@@ -1555,17 +1635,28 @@ pub struct SwapExecute<'info> {
     pub vault: UncheckedAccount<'info>,
     #[account(mut, seeds = [SEED_TREE], bump)]
     pub tree: Box<Account<'info, Tree>>,
+    /// CHECK: original preparer receives escrow and ATA rent
+    #[account(mut)]
+    pub preparer: UncheckedAccount<'info>,
     #[account(
         mut,
-        close = payer,
+        close = preparer,
+        constraint = escrow.preparer == preparer.key() @ LacunaError::BadSwap,
         seeds = [SEED_ESCROW, escrow.nullifier0.as_ref()],
         bump = escrow.bump
     )]
     pub escrow: Box<Account<'info, SwapEscrow>>,
     pub mint_in: Box<InterfaceAccount<'info, Mint>>,
     pub mint_out: Box<InterfaceAccount<'info, Mint>>,
-    #[account(mut)]
+    #[account(
+        mut,
+        associated_token::mint = mint_in,
+        associated_token::authority = escrow,
+        associated_token::token_program = token_program
+    )]
     pub escrow_ata: Box<InterfaceAccount<'info, TokenAccount>>,
+    #[account(mut)]
+    pub vault_ata_in: Box<InterfaceAccount<'info, TokenAccount>>,
     #[account(mut)]
     pub vault_ata_out: Box<InterfaceAccount<'info, TokenAccount>>,
     /// CHECK: allowlisted hop
@@ -1589,6 +1680,7 @@ pub struct SwapExecute<'info> {
     )]
     pub token_state_out: Box<Account<'info, TokenState>>,
     pub token_program: Interface<'info, TokenInterface>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
 }
 
@@ -1603,15 +1695,24 @@ pub struct SwapRefund<'info> {
     pub vault: UncheckedAccount<'info>,
     #[account(mut, seeds = [SEED_TREE], bump)]
     pub tree: Box<Account<'info, Tree>>,
+    /// CHECK: original preparer receives escrow and ATA rent
+    #[account(mut)]
+    pub preparer: UncheckedAccount<'info>,
     #[account(
         mut,
-        close = payer,
+        close = preparer,
+        constraint = escrow.preparer == preparer.key() @ LacunaError::BadSwap,
         seeds = [SEED_ESCROW, escrow.nullifier0.as_ref()],
         bump = escrow.bump
     )]
     pub escrow: Box<Account<'info, SwapEscrow>>,
     pub mint_in: Box<InterfaceAccount<'info, Mint>>,
-    #[account(mut)]
+    #[account(
+        mut,
+        associated_token::mint = mint_in,
+        associated_token::authority = escrow,
+        associated_token::token_program = token_program
+    )]
     pub escrow_ata: Box<InterfaceAccount<'info, TokenAccount>>,
     #[account(mut)]
     pub vault_ata: Box<InterfaceAccount<'info, TokenAccount>>,
@@ -1628,5 +1729,6 @@ pub struct SwapRefund<'info> {
     #[account(mut, seeds = [SEED_TOKEN, escrow.token_in.as_ref()], bump)]
     pub token_state: Box<Account<'info, TokenState>>,
     pub token_program: Interface<'info, TokenInterface>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
 }

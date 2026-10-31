@@ -10,6 +10,7 @@ export { NoteForest, NoteTree } from "./tree";
 export {
   be32,
   bytesField,
+  cipherHash,
   ciphertextHash,
   hexBytes,
   mintField,
