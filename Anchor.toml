@@ -1,0 +1,30 @@
+[toolchain]
+anchor_version = "0.31.1"
+solana_version = "2.1.21"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+lacuna_pool = "2JNUVMq3Qg3DM5SUFDXXaW1zjxDUkt8WMNtMAwJmJPiH"
+lacuna_relay = "BGWyueTRXKDyq2j1KbCT1LGYj6kegwEVEUFzbjPqgtA7"
+dummy_amm = "3t95TV1mKuYTnUdV6snomdNKUG9dBSTMSgVYNVGgoTah"
+
+[programs.devnet]
+lacuna_pool = "2JNUVMq3Qg3DM5SUFDXXaW1zjxDUkt8WMNtMAwJmJPiH"
+lacuna_relay = "BGWyueTRXKDyq2j1KbCT1LGYj6kegwEVEUFzbjPqgtA7"
+dummy_amm = "3t95TV1mKuYTnUdV6snomdNKUG9dBSTMSgVYNVGgoTah"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "localnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "npx mocha --require ts-node/register --timeout 600000 --exit tests/**/*.ts"
+
+[test]
+startup_wait = 20000

@@ -1,0 +1,27 @@
+[package]
+name = "lacuna-pool"
+version = "1.0.0"
+description = "Lacuna privacy pool"
+edition = "2021"
+
+[package.metadata.solana]
+tools-version = "v1.48"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "lacuna_pool"
+
+[features]
+default = []
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+
+[dependencies]
+anchor-lang = { version = "=0.31.1", features = ["init-if-needed"] }
+anchor-spl = "=0.31.1"
+solana-bn254 = "=2.1.21"
+solana-poseidon = "=2.1.21"
+spl-token-2022 = { version = "=6.0.0", default-features = false }

@@ -1,0 +1,20 @@
+[package]
+name = "dummy-amm"
+version = "1.0.0"
+description = "1:1 test AMM for Lacuna relay tests"
+edition = "2021"
+
+[package.metadata.solana]
+tools-version = "v1.48"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "dummy_amm"
+
+[features]
+default = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+
+[dependencies]
+anchor-lang = "=0.31.1"
+anchor-spl = "=0.31.1"

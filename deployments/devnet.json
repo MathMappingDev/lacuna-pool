@@ -1,0 +1,9 @@
+{
+  "network": "devnet",
+  "pool": "2JNUVMq3Qg3DM5SUFDXXaW1zjxDUkt8WMNtMAwJmJPiH",
+  "relay": "BGWyueTRXKDyq2j1KbCT1LGYj6kegwEVEUFzbjPqgtA7",
+  "dummyAmm": "3t95TV1mKuYTnUdV6snomdNKUG9dBSTMSgVYNVGgoTah",
+  "note": "Send about 2 SOL on Solana Devnet to 3P1AxcwEubVX7SNn94w6KMet45tm7K5CLi4oMnhkZMcR, then run npm run deploy:devnet again. Upgrade authority stays with the deployer. Not audited. Not mainnet.",
+  "status": "awaiting-deployer-funds",
+  "deployer": "3P1AxcwEubVX7SNn94w6KMet45tm7K5CLi4oMnhkZMcR"
+}

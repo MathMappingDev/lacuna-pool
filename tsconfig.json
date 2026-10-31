@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "types": ["mocha", "chai", "node"],
+    "typeRoots": ["./node_modules/@types"],
+    "lib": ["ES2022"],
+    "module": "commonjs",
+    "target": "ES2022",
+    "esModuleInterop": true,
+    "strict": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "noImplicitAny": false,
+    "outDir": "./dist"
+  },
+  "include": ["tests/**/*.ts", "sdk/src/**/*.ts", "scripts/**/*.ts", "global.d.ts"]
+}

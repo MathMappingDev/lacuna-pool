@@ -1,0 +1,19 @@
+[package]
+name = "lacuna-relay"
+version = "1.0.0"
+description = "Lacuna relay for CPI calls and re-shields"
+edition = "2021"
+
+[package.metadata.solana]
+tools-version = "v1.48"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "lacuna_relay"
+
+[features]
+default = []
+idl-build = ["anchor-lang/idl-build"]
+
+[dependencies]
+anchor-lang = { version = "=0.31.1", features = ["init-if-needed"] }
